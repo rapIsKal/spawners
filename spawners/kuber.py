@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import uuid
 
 import boto3 as boto3
 from kubernetes import config, client
@@ -14,6 +15,8 @@ class KubernetesSpawner(BaseSpawner):
     def __init__(self):
         config.load_kube_config()
         self.api = client.AppsV1Api()
+        sec = self.build_aws_secret()
+        self.secret = sec
 
     def _aws_login(self):
         ecr_client = boto3.client(
@@ -28,24 +31,27 @@ class KubernetesSpawner(BaseSpawner):
                 .decode()
                 .split(":")
         )
-        return {"username": username, "password": password}
+        return {"username": username, "password": password, "auth": token["authorizationData"][0]["authorizationToken"]}
 
     @staticmethod
     def _prepare_auth_data(data):
         return {".dockerconfigjson": base64.b64encode(
             json.dumps(data).encode()).decode()}
 
+    @staticmethod
+    def _build_image_name(image: str):
+        return f"{os.getenv('AWS_ACCOUNT_ID')}.dkr.ecr.{os.getenv('AWS_REGION')}.amazonaws.com/{image}"
+
     def build_aws_secret(self):
         auth_data = self._aws_login()
         api_instance = client.CoreV1Api()
         data = {"auths": {f"{os.getenv('AWS_ACCOUNT_ID')}.dkr.ecr.{os.getenv('AWS_REGION')}.amazonaws.com": auth_data}}
-        metadata = client.V1ObjectMeta(name="mysecret", labels={"app": "myapp"})
+        metadata = client.V1ObjectMeta(name=f"mysecret", labels={"app": "myapp"})
         sec = client.V1Secret(type='kubernetes.io/dockerconfigjson', data=self._prepare_auth_data(data),
                               metadata=metadata)
+
         api_instance.create_namespaced_secret(namespace="infinity-stand", body=sec)
-
-
-
+        return sec
 
     @sync_to_async
     def spawn(self, image: str = "busybox:1.26.1", server=None, proxy_path: str = None,
@@ -57,14 +63,15 @@ class KubernetesSpawner(BaseSpawner):
             template=client.V1PodTemplateSpec(),
         )
         container = client.V1Container(
-            image=image,
+            image=self._build_image_name(image),
             name=name,
         )
         spec.template.metadata = client.V1ObjectMeta(
             name="busybox",
             labels={"app": "myapp"},
         )
-        spec.template.spec = client.V1PodSpec(containers=[container])
+        spec.template.spec = client.V1PodSpec(containers=[container], image_pull_secrets=[self.secret],
+                                              )
         dep = client.V1Deployment(
             metadata=client.V1ObjectMeta(name=name),
             spec=spec,
