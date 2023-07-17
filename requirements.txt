@@ -1,0 +1,4 @@
+kubernetes
+pytest
+pytest-asyncio
+pytest-ordering
