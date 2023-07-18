@@ -1,7 +1,6 @@
 import base64
 import json
 import os
-import uuid
 
 import boto3 as boto3
 from kubernetes import config, client
@@ -15,8 +14,7 @@ class KubernetesSpawner(BaseSpawner):
     def __init__(self):
         config.load_kube_config()
         self.api = client.AppsV1Api()
-        sec = self.build_aws_secret()
-        self.secret = sec
+        self.secret = None
 
     def _aws_login(self):
         ecr_client = boto3.client(
@@ -43,15 +41,21 @@ class KubernetesSpawner(BaseSpawner):
         return f"{os.getenv('AWS_ACCOUNT_ID')}.dkr.ecr.{os.getenv('AWS_REGION')}.amazonaws.com/{image}"
 
     def build_aws_secret(self):
-        auth_data = self._aws_login()
-        api_instance = client.CoreV1Api()
-        data = {"auths": {f"{os.getenv('AWS_ACCOUNT_ID')}.dkr.ecr.{os.getenv('AWS_REGION')}.amazonaws.com": auth_data}}
-        metadata = client.V1ObjectMeta(name=f"mysecret", labels={"app": "myapp"})
-        sec = client.V1Secret(type='kubernetes.io/dockerconfigjson', data=self._prepare_auth_data(data),
-                              metadata=metadata)
-
-        api_instance.create_namespaced_secret(namespace="infinity-stand", body=sec)
-        return sec
+        if not self.secret:
+            auth_data = self._aws_login()
+            api_instance = client.CoreV1Api()
+            data = {"auths": {f"{os.getenv('AWS_ACCOUNT_ID')}.dkr.ecr.{os.getenv('AWS_REGION')}.amazonaws.com": auth_data}}
+            metadata = client.V1ObjectMeta(name=f"mysecret", labels={"app": "myapp"})
+            sec = client.V1Secret(type='kubernetes.io/dockerconfigjson', data=self._prepare_auth_data(data),
+                                  metadata=metadata)
+            try:
+                api_instance.create_namespaced_secret(namespace="infinity-stand", body=sec)
+            except client.exceptions.ApiException as e:
+                # instance already exists
+                if e.reason != 'Conflict':
+                    raise e
+            self.secret = sec
+        return self.secret
 
     @sync_to_async
     def spawn(self, image: str = "busybox:1.26.1", server=None, proxy_path: str = None,
@@ -70,17 +74,27 @@ class KubernetesSpawner(BaseSpawner):
             name="busybox",
             labels={"app": "myapp"},
         )
-        spec.template.spec = client.V1PodSpec(containers=[container], image_pull_secrets=[self.secret],
+        sec = self.build_aws_secret()
+        spec.template.spec = client.V1PodSpec(containers=[container], image_pull_secrets=[sec],
                                               )
         dep = client.V1Deployment(
             metadata=client.V1ObjectMeta(name=name),
             spec=spec,
         )
-        self.api.create_namespaced_deployment(namespace="infinity-stand", body=dep)
+        try:
+            self.api.create_namespaced_deployment(namespace="infinity-stand", body=dep)
+        except client.exceptions.ApiException as e:
+            # instance already exists
+            if e.reason != 'Conflict':
+                raise e
 
-    # here decorator should be changed to built-in sync_to_async, for example in django-asgiref
     @sync_to_async
     def delete(self, server):
-        return self.api.delete_namespaced_deployment(name="my-app", namespace="infinity-stand",
+        # here should be logic how to extract image name from server
+        try:
+            return self.api.delete_namespaced_deployment(name="my-app", namespace="infinity-stand",
                                                      body=client.V1DeleteOptions(propagation_policy="Foreground", grace_period_seconds=5))
+        except client.exceptions.ApiException as e:
+            if e.reason != 'Not Found':
+                raise e
 
