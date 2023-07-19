@@ -15,3 +15,10 @@ async def test_spawn():
 async def test_delete():
     spawner = KubernetesSpawner()
     await spawner.delete('server')
+
+@pytest.mark.order3
+@pytest.mark.asyncio
+async def test_kuber_spawn_with_limits():
+    spawner = KubernetesSpawner()
+    spawner.spawn(image="serverhub-servers:serverhub-homework-master", memory_limit=1024 * 1e6, cpus=2)
+

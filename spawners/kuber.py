@@ -70,6 +70,11 @@ class KubernetesSpawner(BaseSpawner):
             image=self._build_image_name(image),
             name=name,
         )
+        if memory_limit:
+            container.resources.memory.limit = memory_limit
+        if cpus:
+            # TODO: to make sure that we request not limit the cpus
+            container.resources.cpu.request = cpus
         spec.template.metadata = client.V1ObjectMeta(
             name="busybox",
             labels={"app": "myapp"},
